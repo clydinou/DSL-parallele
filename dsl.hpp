@@ -9,20 +9,19 @@
 #include <map>
 #include <tuple>
 #include <utility>
+#include <memory>
 
-// ─────────────────────────────────────────────
-//  Interface & Structures
-// ─────────────────────────────────────────────
+
+// Activations scalaires et derivees
+inline double sigmoid(double x) { return 1.0 / (1.0 + std::exp(-x)); }
+inline double sigmoid_derivative(double s) { return s * (1.0 - s); }
+inline double tanh_derivative(double t) { return 1.0 - t * t; }
 
 class LossFunction {
 public:
     virtual ~LossFunction() = default;
     virtual double forward(const Matrice& logits, const std::vector<int>& targets) = 0;
     virtual Matrice backward() = 0;
-    // Cree une copie independante de cette fonction de perte. Indispensable
-    // pour que chaque thread ait sa propre instance (avec son propre etat
-    // interne logits_cached/targets_cached/probs) au lieu de partager le
-    // meme objet, ce qui provoquait une data race entre threads.
     virtual LossFunction* clone() const = 0;
 };
 
@@ -31,57 +30,73 @@ typedef struct {
     int debut;
     int fin;
     double alpha;
-    double cout;          // Loss locale moyenne accumulée par le thread
-    int batch_size;        // Taille des mini-batchs traités par le thread
+    double cout;        
+    int batch_size;       
     const Tensor* X;             
     const std::vector<int>* Y;   
     const int* ordre;
-    LossFunction* loss;   // Fonction de perte
-
-    // Poids de depart pour cette epoque (federated averaging).
-    // nullptr => initialisation aleatoire (utilise seulement a la 1ere epoque) ;
-    // sinon, chaque thread reprend la moyenne des poids obtenus a l'epoque precedente.
+    LossFunction* loss;   
     const std::vector<Tensor>* W_conv_init;
     const std::vector<std::vector<double>>* b_conv_init;
     const std::vector<Matrice>* W_dense_init;
     const std::vector<std::vector<double>>* b_dense_init;
-
-    std::vector<Tensor> W_conv_local;    // Poids de toutes les couches Conv2D
-    std::vector<std::vector<double>> b_conv_local; // Biais de toutes les couches Conv2D
-    std::vector<Matrice> W_dense_local;   // Poids de toutes les couches Dense
-    std::vector<std::vector<double>> b_dense_local; // Biais de toutes les couches Dense
+    std::vector<Tensor> W_conv_local;    
+    std::vector<std::vector<double>> b_conv_local; 
+    std::vector<Matrice> W_dense_local;   
+    std::vector<std::vector<double>> b_dense_local; 
 } Arg_CNN;
+
+typedef struct {
+    int index;                 
+    int debut;                 
+    int fin;                  
+    int batch_size;           
+    double alpha;              
+    double cout;               
+    const int* ordre;          
+    const Sequency* X_seq;     
+    int target_col;
+    const Matrice* W_ih_init;  
+    const Matrice* b_ih_init;  
+    const Matrice* W_hy_init;
+    const Matrice* b_y_init;
+    Matrice dW_ih_local;      
+    Matrice db_ih_local;       
+    Matrice dW_hy_local;
+    Matrice db_y_local;
+    int input_size;            
+    int hidden_size;           
+    int seq_len;               
+} Arg_LSTM;
 
 typedef struct {
     std::vector<Arg_CNN> threads_results; 
     Matrice erreurs_threads;
-} CNN_Weights_Par_Thread;
+    std::vector<Tensor> final_W_conv;
+    std::vector<std::vector<double>> final_b_conv;
+    std::vector<Matrice> final_W_dense;
+    std::vector<std::vector<double>> final_b_dense;
+} Par_CNN_thread;
 
-// ─────────────────────────────────────────────
-//  Utilitaires
-// ─────────────────────────────────────────────
+typedef struct {
+    double cout_final;
+    int epoques_effectuees;
+    double temps_execution;
+    Matrice W_ih;
+    Matrice b_ih;
+    Matrice W_hy;
+    Matrice b_y;
+} Par_LSTM_thread;
 
 int* range(int size);
 int select_random_number(int min, int max);
 void shuffle(int* array, int n);
 
-// ─────────────────────────────────────────────
-//  Fonctions d'Activation & Coût
-// ─────────────────────────────────────────────
-
 Matrice sigmoid(Matrice A);
 Matrice softmax(Matrice A);
 
-// ─────────────────────────────────────────────
-//  Gestion des Tenseurs
-// ─────────────────────────────────────────────
-
 Tensor create_tensor(int n, int c, int h, int w, double fill = 0.0);
 Tensor pad_tensor(const Tensor& x, int pad);
-
-// ─────────────────────────────────────────────
-//  Couches du Réseau (Classes CNN)
-// ─────────────────────────────────────────────
 
 class Conv2D {
 public:
@@ -93,14 +108,6 @@ public:
     Tensor x_cached;
 
     Conv2D(int in_c, int out_c, int k_size, int str = 1, int pad = 0);
-    Tensor forward(const Tensor& x);
-    Tensor backward(const Tensor& dout, double lr);
-};
-
-class ReLU {
-public:
-    Tensor x_cached;
-
     Tensor forward(const Tensor& x);
     Tensor backward(const Tensor& dout, double lr);
 };
@@ -119,7 +126,6 @@ public:
 class Flatten {
 public:
     std::vector<int> orig_shape;
-
     Matrice forward(const Tensor& x);
     Tensor backward(const Matrice& dout, double lr);
 };
@@ -136,17 +142,12 @@ public:
     Matrice backward(const Matrice& dout, double lr);
 };
 
-class DenseReLU {
+class ReLU {
 public:
     Matrice x_cached;
-
     Matrice forward(const Matrice& x);
     Matrice backward(const Matrice& dout, double lr);
 };
-
-// ─────────────────────────────────────────────
-//  Fonction de Perte (Loss)
-// ─────────────────────────────────────────────
 
 class CategoricalCrossEntropyWithSoftmax : public LossFunction {
 public:
@@ -159,11 +160,12 @@ public:
     LossFunction* clone() const override { return new CategoricalCrossEntropyWithSoftmax(*this); }
 };
 
-// ─────────────────────────────────────────────
-//  Multi-threading & Architecture Parallèle
-// ─────────────────────────────────────────────
-
 void* cnn_local(void* a);
-CNN_Weights_Par_Thread cnn_reduce(Tensor X, std::vector<int> Y, LossFunction& loss, double alpha, double seuil, int n_epoch, int n_threads, int batch_size = 32);
+Par_CNN_thread cnn_reduce(Tensor X, std::vector<int> Y, LossFunction& loss, double alpha, double seuil, int n_epoch, int n_threads, int batch_size = 32);
+
+void* lstm_local(void* a);
+double lstm_reduce(int n_threads, int input_size, int hidden_size, int seq_len, 
+                   Matrice* W_ih_global, Matrice* b_ih_global, Matrice* W_hy_global, Matrice* b_y_global,
+                   const Sequency& X_seq, int target_col, const std::vector<int>& ordre, double alpha);
 
 #endif // _DSL_HPP
