@@ -1,7 +1,8 @@
-main:main.cpp  matrice.cpp matrice.h dsl.cpp dsl.h fonctions.c fonctions.h time_manager.c time_manager.h
-	g++ -O3 -std=c++11 main.cpp fonction.cpp dsl.cpp matrice.cpp time_manager.cpp -pthread -o main
+main:main.cpp  matrice.cpp matrice.hpp dsl.cpp dsl.hpp fonction.cpp fonction.hpp time_manager.cpp time_manager.hpp
+	g++ -std=c++17 -O3 -pthread main.cpp fonction.cpp dsl.cpp matrice.cpp time_manager.cpp -o programme
 run:
-	./main mnist_test.csv 8
+	./programme mnist_test.csv 8 1  
+	./programme Microsoft_Stock.csv 8 2 
 
 clean:
-	rm main
+	rm programme
